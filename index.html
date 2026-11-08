@@ -434,8 +434,56 @@ function normalize(d) {
   }));
   return b;
 }
-function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} pushRemote(); }
 let state = load();
+
+/* ===================== الحفظ المشترك (قاعدة بيانات الصفحة) ===================== */
+let remote = null, canWrite = true, pushTimer = 0, pushing = Promise.resolve(), lastJSON = "";
+function pushRemote() {
+  if (!remote || !canWrite) return;
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => {
+    const json = JSON.stringify(state);
+    if (json === lastJSON) return;
+    lastJSON = json;
+    pushing = pushing.then(() => remote.set({ json, at: Date.now() })).catch(err => {
+      if (err && ["permission_denied", "not_granted", "revoked"].includes(err.code)) { canWrite = false; applyReadOnly(); }
+      else toast("تعذّر حفظ آخر تعديل، حاول مرة أخرى");
+    });
+  }, 700);
+}
+function rerender() {
+  const typing = document.activeElement && document.activeElement.matches("input");
+  if (view === "race") renderRace();
+  else if (view === "eval" && !typing) renderEval();
+  else if (view === "report") renderReport();
+}
+function applyReadOnly() {
+  document.querySelector('.tab[data-view="eval"]').hidden = !canWrite;
+  ["#importBtn", "#resetBtn"].forEach(q => $(q).hidden = !canWrite);
+  if (!canWrite && view === "eval") show("race");
+}
+(async function connect() {
+  const c = window.claude;
+  if (!c || !c.use) return;
+  const [db, user] = await Promise.all([c.use("db"), c.use("user")]);
+  if (!db) return;
+  if (user && typeof user.canEdit === "function") { try { canWrite = !!(await user.canEdit()); } catch (e) {} }
+  applyReadOnly();
+  remote = db.doc("grades/semester");
+  let first = true;
+  remote.onSnapshot(snap => {
+    if (snap.exists) {
+      const d = snap.data() || {};
+      if (typeof d.json === "string" && d.json !== JSON.stringify(state)) {
+        try { state = normalize(JSON.parse(d.json)); lastJSON = d.json; try { localStorage.setItem(KEY, d.json); } catch (e) {} rerender(); } catch (e) {}
+      } else if (typeof d.json === "string") lastJSON = d.json;
+    } else if (first && canWrite && state.s.some(r => r.some(graded))) {
+      pushRemote(); // أول مرة: انقل الدرجات المحفوظة في هذا الجهاز
+    }
+    first = false;
+  }, () => {});
+})();
 
 /* ===================== الحساب ===================== */
 function pts(e) {
@@ -612,10 +660,16 @@ function renderReport() {
   $("#reportTable").innerHTML = head + "<tbody>" + body + "</tbody>";
 }
 $("#printReport").addEventListener("click", () => window.print());
-$("#exportBtn").addEventListener("click", () => {
-  const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+$("#exportBtn").addEventListener("click", async () => {
+  const filename = "rehlat-alkawakib-" + new Date().toISOString().slice(0, 10) + ".json";
+  const data = JSON.stringify(state, null, 2);
+  const dl = window.claude && window.claude.use ? await window.claude.use("downloads") : null;
+  if (dl) {
+    try { await dl.save({ filename, data }); toast("حُفظت نسخة من الدرجات"); } catch (e) { if (e && e.code !== "declined") toast("لم تُحفظ النسخة"); }
+    return;
+  }
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob); a.download = "rehlat-alkawakib-" + new Date().toISOString().slice(0, 10) + ".json";
+  a.href = URL.createObjectURL(new Blob([data], { type: "application/json" })); a.download = filename;
   document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   toast("نُزّلت نسخة من الدرجات");
 });
